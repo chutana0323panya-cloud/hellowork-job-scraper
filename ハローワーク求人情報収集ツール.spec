@@ -39,7 +39,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='ハローワーク求人情報収集ツール',
+    name='HelloWorkJobScraper',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -3,6 +3,7 @@ name: Windows EXE ビルド
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 jobs:
@@ -30,30 +31,30 @@ jobs:
 
       - name: ビルド成功確認
         run: |
-          if (Test-Path "dist\ハローワーク求人情報収集ツール.exe") {
-            $size = (Get-Item "dist\ハローワーク求人情報収集ツール.exe").Length / 1MB
-            Write-Host "✅ ビルド成功: $([math]::Round($size,1)) MB"
+          if (Test-Path "dist\HelloWorkJobScraper.exe") {
+            $size = (Get-Item "dist\HelloWorkJobScraper.exe").Length / 1MB
+            Write-Host "Build succeeded: $([math]::Round($size,1)) MB"
           } else {
-            Write-Error "❌ EXEが見つかりません"
+            Write-Error "EXE not found"
             exit 1
           }
 
       - name: EXE をアーティファクトとしてアップロード
         uses: actions/upload-artifact@v4
         with:
-          name: ハローワーク求人情報収集ツール_Windows
-          path: dist/ハローワーク求人情報収集ツール.exe
+          name: HelloWorkJobScraper_Windows
+          path: dist/HelloWorkJobScraper.exe
           retention-days: 30
 
-      - name: リリースを作成（タグ付きプッシュ時のみ）
+      - name: EXE をリリースに添付（タグ付きプッシュ時のみ）
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ハローワーク求人情報収集ツール.exe
+          files: dist/HelloWorkJobScraper.exe
           name: ${{ github.ref_name }}
           body: |
             ## ハローワーク求人情報収集ツール ${{ github.ref_name }}
 
             ### ダウンロード
-            下の **Assets** から `ハローワーク求人情報収集ツール.exe` をダウンロードしてください。
-            インストール不要・ダブルクリックで起動します。
+            下の **Assets** から `HelloWorkJobScraper.exe` をダウンロードしてください。
+            **インストール不要・ダブルクリックで起動します。**
