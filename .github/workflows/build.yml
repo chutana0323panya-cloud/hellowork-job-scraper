@@ -1,0 +1,59 @@
+name: Windows EXE ビルド
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージをインストール
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: EXE をビルド
+        run: |
+          pyinstaller "ハローワーク求人情報収集ツール.spec" --noconfirm
+
+      - name: ビルド成功確認
+        run: |
+          if (Test-Path "dist\ハローワーク求人情報収集ツール.exe") {
+            $size = (Get-Item "dist\ハローワーク求人情報収集ツール.exe").Length / 1MB
+            Write-Host "✅ ビルド成功: $([math]::Round($size,1)) MB"
+          } else {
+            Write-Error "❌ EXEが見つかりません"
+            exit 1
+          }
+
+      - name: EXE をアーティファクトとしてアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: ハローワーク求人情報収集ツール_Windows
+          path: dist/ハローワーク求人情報収集ツール.exe
+          retention-days: 30
+
+      - name: リリースを作成（タグ付きプッシュ時のみ）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ハローワーク求人情報収集ツール.exe
+          name: ${{ github.ref_name }}
+          body: |
+            ## ハローワーク求人情報収集ツール ${{ github.ref_name }}
+
+            ### ダウンロード
+            下の **Assets** から `ハローワーク求人情報収集ツール.exe` をダウンロードしてください。
+            インストール不要・ダブルクリックで起動します。
