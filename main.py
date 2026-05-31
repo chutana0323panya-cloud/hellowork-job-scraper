@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import os
+import json
 import queue
 import logging
 from datetime import datetime
@@ -23,16 +24,19 @@ APP_FG    = "#FFFFFF"
 BTN_GREEN = "#217346"
 BTN_RED   = "#C0392B"
 
+SEEN_IDS_FILE = os.path.join(os.path.expanduser("~"), ".hellowork_seen_ids.json")
+
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1000x720")
-        self.minsize(880, 600)
+        self.geometry("1000x780")
+        self.minsize(880, 650)
         self.resizable(True, True)
 
         self._results = []
+        self._new_ids: set = set()
         self._scraper: Optional[HelloWorkScraper] = None
         self._thread: Optional[threading.Thread] = None
         self._log_queue: queue.Queue = queue.Queue()
@@ -127,7 +131,30 @@ class App(tk.Tk):
         r += 1
 
         ttk.Separator(left, orient="horizontal").grid(
-            row=r, column=0, columnspan=2, sticky="ew", pady=10)
+            row=r, column=0, columnspan=2, sticky="ew", pady=6)
+        r += 1
+
+        # 差分モード設定エリア
+        diff_lf = ttk.LabelFrame(left, text="差分モード", padding=6)
+        diff_lf.grid(row=r, column=0, columnspan=2, sticky="ew", pady=4)
+        r += 1
+
+        self._diff_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(diff_lf, text="新規求人のみ取得する",
+                        variable=self._diff_var).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+
+        self._seen_label = tk.StringVar(value=self._get_seen_count_text())
+        ttk.Label(diff_lf, textvariable=self._seen_label,
+                  foreground="#555555", font=("Meiryo UI", 9)).grid(
+            row=1, column=0, sticky="w", pady=2)
+
+        ttk.Button(diff_lf, text="履歴クリア",
+                   command=self._clear_history).grid(
+            row=1, column=1, sticky="e", padx=(4, 0))
+
+        ttk.Separator(left, orient="horizontal").grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=6)
         r += 1
 
         self._btn_start = ttk.Button(left, text="▶  収集開始", style="Green.TButton",
@@ -146,7 +173,7 @@ class App(tk.Tk):
         r += 1
 
         ttk.Separator(left, orient="horizontal").grid(
-            row=r, column=0, columnspan=2, sticky="ew", pady=10)
+            row=r, column=0, columnspan=2, sticky="ew", pady=6)
         r += 1
         self._cnt_var = tk.StringVar(value="取得件数:  0 件")
         ttk.Label(left, textvariable=self._cnt_var,
@@ -175,6 +202,46 @@ class App(tk.Tk):
         self._log_text.tag_config("ok",    foreground="#4ec9b0")
         self._log_text.tag_config("info",  foreground="#d4d4d4")
 
+    # ------------------------------------------------------------------ 差分管理
+    def _get_seen_count_text(self) -> str:
+        ids = self._load_seen_ids()
+        return f"取得済み履歴: {len(ids)} 件"
+
+    def _load_seen_ids(self) -> set:
+        try:
+            if os.path.exists(SEEN_IDS_FILE):
+                with open(SEEN_IDS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return set(data.get("seen_ids", []))
+        except Exception:
+            pass
+        return set()
+
+    def _save_seen_ids(self, new_ids: set):
+        try:
+            existing = self._load_seen_ids()
+            all_ids = existing | {i for i in new_ids if i}
+            with open(SEEN_IDS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"seen_ids": list(all_ids)}, f, ensure_ascii=False)
+            self._seen_label.set(self._get_seen_count_text())
+        except Exception as exc:
+            self._log_put(f"[ERROR] 履歴保存失敗: {exc}", "error")
+
+    def _clear_history(self):
+        if not messagebox.askyesno(
+            "確認",
+            "収集履歴をすべて削除しますか？\n次回収集時はすべての求人が「新規」として扱われます。"
+        ):
+            return
+        try:
+            if os.path.exists(SEEN_IDS_FILE):
+                os.remove(SEEN_IDS_FILE)
+            self._seen_label.set(self._get_seen_count_text())
+            self._log_put("履歴をクリアしました。", "ok")
+        except Exception as exc:
+            messagebox.showerror("エラー", f"履歴クリアに失敗しました: {exc}")
+
+    # ------------------------------------------------------------------ Actions
     def _browse_dir(self):
         d = filedialog.askdirectory(title="保存先フォルダを選択")
         if d:
@@ -192,6 +259,7 @@ class App(tk.Tk):
 
         self._max_total = max_cnt
         self._results   = []
+        self._new_ids   = set()
         self._prog_var.set(0)
         self._cnt_var.set("取得件数:  0 件")
         self._status_var.set("収集中...")
@@ -224,7 +292,7 @@ class App(tk.Tk):
             self._log_put(msg, tag)
 
         try:
-            self._results = self._scraper.search(
+            all_results = self._scraper.search(
                 keyword=self._kw_var.get(),
                 prefecture=self._pref_var.get(),
                 emp_type=self._emp_var.get(),
@@ -232,6 +300,24 @@ class App(tk.Tk):
                 progress_callback=on_progress,
                 log_callback=on_log,
             )
+
+            self._new_ids = {r.get("求人番号", "") for r in all_results}
+
+            if self._diff_var.get():
+                seen = self._load_seen_ids()
+                before = len(all_results)
+                self._results = [
+                    r for r in all_results
+                    if r.get("求人番号", "") not in seen
+                ]
+                skipped = before - len(self._results)
+                if skipped:
+                    self._log_put(
+                        f"差分フィルタ: {skipped} 件は既取得済みのためスキップしました", "info"
+                    )
+            else:
+                self._results = all_results
+
             self.after(0, self._done, True)
         except Exception as exc:
             self._log_put(f"[ERROR] {exc}", "error")
@@ -245,9 +331,12 @@ class App(tk.Tk):
         self._prog_label.set(f"完了: {n} 件")
         if n:
             self._btn_export.config(state="normal")
-            self._status_var.set(f"収集完了 ({n} 件)")
+            diff_note = "（差分）" if self._diff_var.get() else ""
+            self._status_var.set(f"収集完了{diff_note} ({n} 件)")
         else:
-            self._status_var.set("収集完了 (データなし)")
+            msg = "収集完了 (新規データなし)" if self._diff_var.get() else "収集完了 (データなし)"
+            self._status_var.set(msg)
+        self._save_seen_ids(self._new_ids)
 
     def _export(self):
         if not self._results:
@@ -255,8 +344,9 @@ class App(tk.Tk):
             return
         save_dir = self._dir_var.get()
         os.makedirs(save_dir, exist_ok=True)
-        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(save_dir, f"ハローワーク求人情報_{ts}.xlsx")
+        ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = "_差分" if self._diff_var.get() else ""
+        path   = os.path.join(save_dir, f"ハローワーク求人情報{suffix}_{ts}.xlsx")
         try:
             ExcelExporter().export(self._results, path)
             self._log_put(f"Excel保存完了: {path}", "ok")
@@ -265,6 +355,7 @@ class App(tk.Tk):
             self._log_put(f"[ERROR] エクスポート失敗: {exc}", "error")
             messagebox.showerror("エラー", f"エクスポートに失敗しました。\n\n{exc}")
 
+    # ------------------------------------------------------------------ Log
     def _log_put(self, msg: str, tag: str = "info"):
         ts = datetime.now().strftime("%H:%M:%S")
         self._log_queue.put((f"[{ts}] {msg}\n", tag))
