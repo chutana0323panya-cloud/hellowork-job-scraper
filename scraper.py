@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 import time
 import re
 import logging
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
@@ -28,12 +28,13 @@ PREFECTURE_CODES = {
     "宮崎県": "45", "鹿児島県": "46", "沖縄県": "47",
 }
 
+# 雇用形態 → ippanCKBox 値リスト（フルタイム=1, パート=2）
 EMP_TYPE_CODES = {
-    "指定なし": "",
-    "正社員": "1",
-    "契約社員": "3",
-    "パート・アルバイト": "4",
-    "派遣社員": "5",
+    "指定なし": [],
+    "正社員": ["1"],
+    "契約社員": ["1"],
+    "パート・アルバイト": ["2"],
+    "派遣社員": ["1"],
 }
 
 CORP_FIELD_MAP = {
@@ -47,6 +48,7 @@ CORP_FIELD_MAP = {
     "従業員数企業全体": "従業員数企業全体",
     "従業員数（就業場所）": "従業員数就業場所",
     "従業員数就業場所": "従業員数就業場所",
+    "従業員数": "従業員数企業全体",
     "資本金": "資本金",
     "設立年": "創業年",
     "創業年": "創業年",
@@ -59,11 +61,13 @@ CORP_FIELD_MAP = {
     "転勤の範囲": "転勤範囲",
     "転勤範囲": "転勤範囲",
     "事業所所在地": "事業所所在地",
+    "所在地": "事業所所在地",
 }
 
 JOB_FIELD_MAP = {
     "職種": "職種",
     "仕事の内容": "仕事内容",
+    "仕事内容": "仕事内容",
     "必要な経験等": "必要な経験等",
     "必要なPCスキル": "必要なPCスキル",
     "必要な免許・資格": "必要な免許・資格",
@@ -105,6 +109,13 @@ EMPTY_RECORD = {
     "詳細URL": "",
 }
 
+_MABA_VRBS = (
+    "infTkRiyoDantaiBtn,searchShosaiBtn,searchBtn,searchNoBtn,"
+    "searchClearBtn,searchNoClearBtn,searchNoClearBtn_mobile,"
+    "dispDetailBtn,kyujinhyoBtn,checkedKyujinViewBtn,"
+    "checkedKyujinhyoIppanBtn,checkedKyujinhyoDsBtn,changeSearchCond"
+)
+
 
 def _clean(text: Optional[str]) -> str:
     if not text:
@@ -114,9 +125,7 @@ def _clean(text: Optional[str]) -> str:
 
 class HelloWorkScraper:
     BASE_URL = "https://www.hellowork.mhlw.go.jp"
-    FORM_URL = "/jobsearch/jobsearch_inputform.do"
-    LIST_URL = "/jobsearch/jobsearch_list.do"
-    DETAIL_URL = "/jobsearch/jobsearch_detail.do"
+    KENSAKU_URL = "/kensaku/GECA110010.do"
 
     def __init__(self, delay: float = 2.0):
         self.delay = delay
@@ -130,6 +139,7 @@ class HelloWorkScraper:
             ),
             "Accept-Language": "ja,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.hellowork.mhlw.go.jp/",
         })
 
     def search(
@@ -150,22 +160,44 @@ class HelloWorkScraper:
 
         try:
             log("ハローワーク検索フォームへ接続中...")
-            resp = self._get(self.BASE_URL + self.FORM_URL)
-            soup = BeautifulSoup(resp.text, "lxml")
-            form_data = self._extract_form_fields(soup)
+            init_url = (
+                self.BASE_URL + self.KENSAKU_URL
+                + "?action=initDisp&screenId=GECA110010"
+            )
+            self._get(init_url)
 
             pref_code = PREFECTURE_CODES.get(prefecture, "")
-            emp_code = EMP_TYPE_CODES.get(emp_type, "")
+            emp_boxes = EMP_TYPE_CODES.get(emp_type, [])
 
-            form_data.update({
-                "GEK": pref_code,
-                "FREEWORD": keyword,
-            })
-            if emp_code:
-                form_data["SHURUI"] = emp_code
+            form_data: List[Tuple[str, str]] = [
+                ("action", "searchBtn"),
+                ("screenId", "GECA110010"),
+                ("kjKbnRadioBtn", "1"),
+                ("freeWordInput", keyword),
+                ("freeWordRadioBtn", "0"),
+                ("todohukenHidden", pref_code),
+                ("ensenHidden", ""),
+                ("roudousijyoHidden", ""),
+                ("kyujinkensu", "0"),
+                ("iNFTeikyoRiyoDantaiID", ""),
+                ("searchClear", "0"),
+                ("kiboSuruSKSU1Hidden", ""),
+                ("kiboSuruSKSU2Hidden", ""),
+                ("kiboSuruSKSU3Hidden", ""),
+                ("summaryDisp", "false"),
+                ("searchInitDisp", "0"),
+                ("hiddenViewedKyujinList", ""),
+                ("CHECKEDKJNOLIST", ""),
+                ("maba_vrbs", _MABA_VRBS),
+                ("preCheckFlg", "false"),
+                ("searchBtn", "検索する"),
+            ]
+            for box in emp_boxes:
+                form_data.append(("ippanCKBox", box))
 
             log(f"検索条件: 都道府県={prefecture}, キーワード={keyword}, 雇用形態={emp_type}")
-            resp = self._post(self.BASE_URL + self.LIST_URL, form_data)
+            list_url = self.BASE_URL + self.KENSAKU_URL
+            resp = self._post(list_url, form_data)
 
         except Exception as exc:
             log(f"[ERROR] 検索フォーム取得失敗: {exc}")
@@ -192,11 +224,11 @@ class HelloWorkScraper:
                         progress_callback(len(results))
                 time.sleep(self.delay)
 
-            next_url = self._find_next_page_url(soup)
-            if not next_url or self.stop_flag or len(results) >= max_count:
+            next_data = self._find_next_page_data(soup)
+            if not next_data or self.stop_flag or len(results) >= max_count:
                 break
-            log(f"次のページへ移動: {next_url}")
-            resp = self._get(next_url)
+            log(f"次のページへ移動 (ページ {page + 1})")
+            resp = self._post(self.BASE_URL + self.KENSAKU_URL, next_data)
             page += 1
 
         log(f"収集完了: {len(results)} 件")
@@ -208,52 +240,60 @@ class HelloWorkScraper:
         resp.raise_for_status()
         return resp
 
-    def _post(self, url: str, data: dict, **kwargs) -> requests.Response:
+    def _post(self, url: str, data, **kwargs) -> requests.Response:
         time.sleep(0.5)
         resp = self.session.post(url, data=data, timeout=30, **kwargs)
         resp.raise_for_status()
         return resp
 
-    def _extract_form_fields(self, soup: BeautifulSoup) -> dict:
-        fields = {}
-        form = soup.find("form")
-        if not form:
-            return fields
-        for inp in form.find_all("input"):
-            name = inp.get("name")
-            val = inp.get("value", "")
-            if name and inp.get("type") not in ("submit", "button", "image", "reset"):
-                fields[name] = val
-        for sel in form.find_all("select"):
-            name = sel.get("name")
-            opt = sel.find("option", selected=True)
-            if name:
-                fields[name] = opt["value"] if opt else ""
-        return fields
-
     def _extract_detail_links(self, soup: BeautifulSoup) -> List[dict]:
         links = []
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            if "jobsearch_detail" in href or "kyujin_detail" in href:
-                links.append({"url": urljoin(self.BASE_URL, href)})
-        for form in soup.find_all("form", action=True):
-            action = form.get("action", "")
-            if "jobsearch_detail" in action or "kyujin_detail" in action:
-                hidden = {
-                    inp["name"]: inp.get("value", "")
-                    for inp in form.find_all("input")
-                    if inp.get("name")
-                }
-                links.append({"post_url": urljoin(self.BASE_URL, action), "post_data": hidden})
+        base = self.BASE_URL + self.KENSAKU_URL
+        seen_kjno: set = set()
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            if "dispDetailBtn" in href:
+                m = re.search(r"kJNo=([^&]+)", href)
+                kjno = m.group(1) if m else href
+                if kjno not in seen_kjno:
+                    seen_kjno.add(kjno)
+                    links.append({"url": urljoin(base, href)})
         return links
 
-    def _find_next_page_url(self, soup: BeautifulSoup) -> Optional[str]:
-        for a in soup.find_all("a", href=True):
-            text = _clean(a.get_text())
-            if text in ("次へ", "次の20件", "次のページ", "次へ>", ">"):
-                return urljoin(self.BASE_URL, a["href"])
-        return None
+    def _find_next_page_data(self, soup: BeautifulSoup) -> Optional[List[Tuple[str, str]]]:
+        form = soup.find("form", id="ID_form_1")
+        if not form:
+            return None
+
+        next_btn = form.find("input", {"name": "fwListNaviBtnNext"})
+        if not next_btn:
+            return None
+
+        data: List[Tuple[str, str]] = []
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            type_ = (inp.get("type") or "text").lower()
+            val = inp.get("value", "")
+
+            if not name:
+                continue
+            if type_ in ("submit", "button", "image", "reset"):
+                continue
+            if type_ == "radio" and not inp.get("checked"):
+                continue
+            if type_ == "checkbox" and not inp.get("checked"):
+                continue
+
+            data.append((name, val))
+
+        for sel in form.find_all("select"):
+            name = sel.get("name")
+            if name:
+                opt = sel.find("option", selected=True)
+                data.append((name, opt["value"] if opt else ""))
+
+        data.append(("fwListNaviBtnNext", next_btn.get("value", "次へ＞")))
+        return data
 
     def _scrape_detail(self, detail_info: dict, log: Callable) -> Optional[Dict]:
         try:
