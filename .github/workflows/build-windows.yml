@@ -28,9 +28,14 @@ jobs:
           pyinstaller "ハローワーク求人情報収集ツール_Win.spec"
 
       - name: Create ZIP
-        run: |
-          Compress-Archive -Path "dist\ハローワーク求人情報収集ツール.exe" -DestinationPath "dist\HelloWorkJobScraper_Win.zip"
         shell: powershell
+        run: |
+          $exeFiles = Get-ChildItem -Path "dist" -Filter "*.exe"
+          if ($exeFiles.Count -eq 0) { Write-Error "No .exe found in dist/"; exit 1 }
+          $exePath = $exeFiles[0].FullName
+          Write-Host "Found exe: $exePath"
+          Compress-Archive -LiteralPath $exePath -DestinationPath "dist\HelloWorkJobScraper_Win.zip"
+          Write-Host "ZIP created successfully"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
