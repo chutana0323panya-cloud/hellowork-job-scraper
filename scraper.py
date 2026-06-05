@@ -1,16 +1,93 @@
 """
-ハローワーク求人情報スクレイパー
+ハローワーク求人情報スクレイパー (v1.2.0 - エラー耐性強化版)
 """
 
+import sys
+import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import time
 import re
 import logging
-from typing import Dict, List, Optional, Callable, Tuple
+from typing import Dict, List, Optional, Callable, Tuple, Set
 from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 5
+CONNECT_TIMEOUT = 30
+READ_TIMEOUT = 90
+
+
+def _configure_ssl_for_pyinstaller():
+    """PyInstallerバンドル時にSSL証明書パスを明示的に設定する"""
+    if not getattr(sys, 'frozen', False):
+        return
+    try:
+        import certifi
+        ca_bundle = certifi.where()
+        if os.path.exists(ca_bundle):
+            os.environ['REQUESTS_CA_BUNDLE'] = ca_bundle
+            os.environ['SSL_CERT_FILE'] = ca_bundle
+            logger.info(f"SSL CA bundle set: {ca_bundle}")
+            return
+    except ImportError:
+        pass
+    # Fallback: look for cacert.pem in the bundle directory
+    bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    for candidate in [
+        os.path.join(bundle_dir, 'certifi', 'cacert.pem'),
+        os.path.join(bundle_dir, 'cacert.pem'),
+    ]:
+        if os.path.exists(candidate):
+            os.environ['REQUESTS_CA_BUNDLE'] = candidate
+            os.environ['SSL_CERT_FILE'] = candidate
+            logger.info(f"SSL CA bundle set (fallback): {candidate}")
+            return
+
+
+_configure_ssl_for_pyinstaller()
+
+
+def _get_ssl_verify():
+    """SSL証明書検証に使用するパスまたはフラグを返す"""
+    # 環境変数が設定済みならそれを使う
+    env_bundle = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')
+    if env_bundle and os.path.exists(env_bundle):
+        return env_bundle
+    try:
+        import certifi
+        return certifi.where()
+    except ImportError:
+        return True
+
+
+def _build_retry_session() -> requests.Session:
+    """リトライロジック付きrequestsセッションを作成する"""
+    session = requests.Session()
+    try:
+        retry = Retry(
+            total=MAX_RETRIES,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=False,
+            raise_on_status=False,
+        )
+    except TypeError:
+        retry = Retry(
+            total=MAX_RETRIES,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            method_whitelist=False,
+            raise_on_status=False,
+        )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
 
 PREFECTURE_CODES = {
     "指定なし": "",
@@ -28,7 +105,6 @@ PREFECTURE_CODES = {
     "宮崎県": "45", "鹿児島県": "46", "沖縄県": "47",
 }
 
-# 雇用形態 → ippanCKBox 値リスト（フルタイム=1, パート=2）
 EMP_TYPE_CODES = {
     "指定なし": [],
     "正社員": ["1"],
@@ -130,10 +206,11 @@ class HelloWorkScraper:
     def __init__(self, delay: float = 2.0):
         self.delay = delay
         self.stop_flag = False
-        self.session = requests.Session()
+        self.session = _build_retry_session()
+        self._ssl_verify = _get_ssl_verify()
         self.session.headers.update({
             "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
@@ -150,8 +227,16 @@ class HelloWorkScraper:
         max_count: int = 100,
         progress_callback: Optional[Callable] = None,
         log_callback: Optional[Callable] = None,
+        checkpoint_callback: Optional[Callable] = None,
+        skip_ids: Optional[Set[str]] = None,
     ) -> List[Dict]:
+        """
+        求人情報を収集する。
+        skip_ids: すでに収集済みの求人番号（URLのkJNoベース）。該当するものはスキップする。
+        checkpoint_callback: ページ完了ごとに呼ばれる (results_so_far) -> None
+        """
         results: List[Dict] = []
+        skip_ids = skip_ids or set()
 
         def log(msg: str):
             logger.info(msg)
@@ -164,7 +249,7 @@ class HelloWorkScraper:
                 self.BASE_URL + self.KENSAKU_URL
                 + "?action=initDisp&screenId=GECA110010"
             )
-            self._get(init_url)
+            self._get(init_url, log=log)
 
             pref_code = PREFECTURE_CODES.get(prefecture, "")
             emp_boxes = EMP_TYPE_CODES.get(emp_type, [])
@@ -197,7 +282,7 @@ class HelloWorkScraper:
 
             log(f"検索条件: 都道府県={prefecture}, キーワード={keyword}, 雇用形態={emp_type}")
             list_url = self.BASE_URL + self.KENSAKU_URL
-            resp = self._post(list_url, form_data)
+            resp = self._post(list_url, form_data, log=log)
 
         except Exception as exc:
             log(f"[ERROR] 検索フォーム取得失敗: {exc}")
@@ -217,34 +302,113 @@ class HelloWorkScraper:
             for detail_info in links:
                 if self.stop_flag or len(results) >= max_count:
                     break
+
+                kjno = detail_info.get("kjno", "")
+                if kjno and kjno in skip_ids:
+                    log(f"  スキップ (収集済み): {kjno}")
+                    continue
+
                 record = self._scrape_detail(detail_info, log)
                 if record:
                     results.append(record)
+                    skip_ids.add(kjno)
                     if progress_callback:
                         progress_callback(len(results))
                 time.sleep(self.delay)
+
+            # ページ完了後にチェックポイント保存
+            if checkpoint_callback:
+                checkpoint_callback(results[:])
 
             next_data = self._find_next_page_data(soup)
             if not next_data or self.stop_flag or len(results) >= max_count:
                 break
             log(f"次のページへ移動 (ページ {page + 1})")
-            resp = self._post(self.BASE_URL + self.KENSAKU_URL, next_data)
+            try:
+                resp = self._post(self.BASE_URL + self.KENSAKU_URL, next_data, log=log)
+            except Exception as exc:
+                log(f"[ERROR] ページ遷移失敗: {exc}。ここまでの収集結果を保持します。")
+                break
             page += 1
 
         log(f"収集完了: {len(results)} 件")
         return results
 
-    def _get(self, url: str, **kwargs) -> requests.Response:
+    def _get(self, url: str, log: Optional[Callable] = None, **kwargs) -> requests.Response:
         time.sleep(0.5)
-        resp = self.session.get(url, timeout=30, **kwargs)
-        resp.raise_for_status()
-        return resp
+        last_exc = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = self.session.get(
+                    url,
+                    timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                    verify=self._ssl_verify,
+                    **kwargs,
+                )
+                resp.raise_for_status()
+                return resp
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                wait = min(2 ** (attempt + 1), 60)
+                msg = f"  [WARN] 通信エラー (試行 {attempt+1}/{MAX_RETRIES}): {type(e).__name__}。{wait}秒後に再試行..."
+                logger.warning(msg)
+                if log:
+                    log(msg)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+            except requests.exceptions.SSLError as e:
+                msg = f"  [WARN] SSL エラー (試行 {attempt+1}/{MAX_RETRIES}): {e}。"
+                if attempt == 0:
+                    # Fallback: try without verification as last resort
+                    msg += "証明書検証をスキップして再試行します。"
+                    if log:
+                        log(msg)
+                    try:
+                        resp = self.session.get(
+                            url,
+                            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                            verify=False,
+                            **kwargs,
+                        )
+                        resp.raise_for_status()
+                        return resp
+                    except Exception:
+                        pass
+                last_exc = e
+                if log:
+                    log(msg)
+                break
+        raise last_exc or requests.exceptions.RequestException("最大リトライ回数を超えました")
 
-    def _post(self, url: str, data, **kwargs) -> requests.Response:
+    def _post(self, url: str, data, log: Optional[Callable] = None, **kwargs) -> requests.Response:
         time.sleep(0.5)
-        resp = self.session.post(url, data=data, timeout=30, **kwargs)
-        resp.raise_for_status()
-        return resp
+        last_exc = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = self.session.post(
+                    url,
+                    data=data,
+                    timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                    verify=self._ssl_verify,
+                    **kwargs,
+                )
+                resp.raise_for_status()
+                return resp
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                wait = min(2 ** (attempt + 1), 60)
+                msg = f"  [WARN] 通信エラー (試行 {attempt+1}/{MAX_RETRIES}): {type(e).__name__}。{wait}秒後に再試行..."
+                logger.warning(msg)
+                if log:
+                    log(msg)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+            except requests.exceptions.SSLError as e:
+                last_exc = e
+                if log:
+                    log(f"  [WARN] SSL エラー: {e}")
+                break
+        raise last_exc or requests.exceptions.RequestException("最大リトライ回数を超えました")
 
     def _extract_detail_links(self, soup: BeautifulSoup) -> List[dict]:
         links = []
@@ -257,7 +421,7 @@ class HelloWorkScraper:
                 kjno = m.group(1) if m else href
                 if kjno not in seen_kjno:
                     seen_kjno.add(kjno)
-                    links.append({"url": urljoin(base, href)})
+                    links.append({"url": urljoin(base, href), "kjno": kjno})
         return links
 
     def _find_next_page_data(self, soup: BeautifulSoup) -> Optional[List[Tuple[str, str]]]:
@@ -298,11 +462,11 @@ class HelloWorkScraper:
     def _scrape_detail(self, detail_info: dict, log: Callable) -> Optional[Dict]:
         try:
             if "url" in detail_info:
-                resp = self._get(detail_info["url"])
+                resp = self._get(detail_info["url"], log=log)
                 page_url = detail_info["url"]
             else:
                 resp = self._post(
-                    detail_info["post_url"], detail_info["post_data"]
+                    detail_info["post_url"], detail_info["post_data"], log=log
                 )
                 page_url = detail_info["post_url"]
 

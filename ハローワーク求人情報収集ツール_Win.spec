@@ -1,10 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Windows版 PyInstaller spec
+import certifi
+import os
+
+CA_BUNDLE = certifi.where()
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (CA_BUNDLE, 'certifi'),
+    ],
     hiddenimports=[
         'lxml',
         'lxml._elementpath',
@@ -15,6 +22,10 @@ a = Analysis(
         'requests.auth',
         'requests.cookies',
         'requests.exceptions',
+        'requests.packages.urllib3',
+        'urllib3',
+        'urllib3.util.retry',
+        'certifi',
         'openpyxl',
         'openpyxl.styles',
         'openpyxl.utils',
@@ -39,7 +50,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='HelloWorkJobScraper',
+    name='ハローワーク求人情報収集ツール',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

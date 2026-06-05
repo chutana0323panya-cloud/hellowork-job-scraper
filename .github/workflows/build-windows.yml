@@ -1,0 +1,62 @@
+name: Build Windows App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Windows exe
+        run: |
+          pyinstaller "ハローワーク求人情報収集ツール_Win.spec"
+
+      - name: Create ZIP
+        run: |
+          Compress-Archive -Path "dist\ハローワーク求人情報収集ツール.exe" -DestinationPath "dist\HelloWorkJobScraper_Win.zip"
+        shell: powershell
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloWorkJobScraper_Win
+          path: dist/HelloWorkJobScraper_Win.zip
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/HelloWorkJobScraper_Win.zip
+          body: |
+            ## ハローワーク求人情報収集ツール Windows版
+
+            ### 変更点 (v1.2.0)
+            - **TLS証明書エラー修正**: 「Could not find a suitable TLS CA certificate bundle」エラーを解消
+            - **タイムアウト強化**: 最大90秒 + 最大5回リトライ（指数バックオフ）
+            - **チェックポイント保存**: エラー・停止時に収集済みデータを自動保存
+            - **再開機能**: 「前回の続きから再開」ボタンで途中から収集を再開
+            - **エラー時もエクスポート可能**: エラーが発生しても収集済みデータをExcel出力できます
+
+            ### ダウンロード
+            `HelloWorkJobScraper_Win.zip` をダウンロードして解凍し、
+            `ハローワーク求人情報収集ツール.exe` を実行してください。
+
+            ### 注意事項
+            - Windows Defender や SmartScreen で警告が出た場合は「詳細情報」→「実行」を選択してください
+            - ウイルス対策ソフトが誤検知する場合は除外設定を追加してください
